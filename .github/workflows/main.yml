@@ -1,57 +1,124 @@
 name: build-jar
+
 on:
   push:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           path: repo
-      - uses: actions/checkout@v4
+
+      - name: Checkout Fabric template
+        uses: actions/checkout@v4
         with:
           repository: FabricMC/fabric-example-mod
           ref: "1.21.11"
           path: tpl
-      - uses: actions/setup-java@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 25
-      - name: Распаковать мод и подставить в шаблон
+          java-version: "21"
+
+      - name: Unpack mod and copy sources
+        shell: bash
         run: |
-          mkdir mod
-          for z in repo/*.zip; do unzip -q -o "$z" -d mod; done
+          set -euo pipefail
+
+          mkdir -p mod
+          shopt -s nullglob
+          archives=(repo/*.zip)
+
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "ERROR: no ZIP archive found in repository root (repo/*.zip)"
+            exit 1
+          fi
+
+          for archive in "${archives[@]}"; do
+            echo "Extracting: $archive"
+            unzip -q -o "$archive" -d mod
+          done
+
+          echo "Extracted archive structure:"
+          find mod -maxdepth 5 -type d | sort | head -200
+
+          # Find the actual project root even if the ZIP contains an extra
+          # enclosing directory such as lostvisuals-build/src/...
+          RESOURCES_DIR="$(find mod -type d -path '*/src/main/resources' -print -quit)"
+
+          if [ -z "$RESOURCES_DIR" ]; then
+            echo "ERROR: ZIP does not contain a src/main/resources directory."
+            echo "Directories found:"
+            find mod -maxdepth 7 -type d | sort
+            exit 1
+          fi
+
+          MOD_ROOT="${RESOURCES_DIR%/src/main/resources}"
+          echo "Detected mod root: $MOD_ROOT"
+
           rm -rf tpl/src/main/java tpl/src/main/resources tpl/src/client
-          if [ -d mod/src/main/java ]; then cp -r mod/src/main/java tpl/src/main/java; fi
-          cp -r mod/src/main/resources tpl/src/main/resources
-          mkdir -p tpl/src/client
-          if [ -d mod/src/client/java ]; then cp -r mod/src/client/java tpl/src/client/java; fi
-          if [ -d mod/src/client/resources ]; then cp -r mod/src/client/resources tpl/src/client/resources; fi
-      - name: Сборка
+          mkdir -p tpl/src/main/resources tpl/src/client
+
+          if [ -d "$MOD_ROOT/src/main/java" ]; then
+            mkdir -p tpl/src/main/java
+            cp -a "$MOD_ROOT/src/main/java/." tpl/src/main/java/
+          fi
+
+          cp -a "$MOD_ROOT/src/main/resources/." tpl/src/main/resources/
+
+          if [ -d "$MOD_ROOT/src/client/java" ]; then
+            mkdir -p tpl/src/client/java
+            cp -a "$MOD_ROOT/src/client/java/." tpl/src/client/java/
+          fi
+
+          if [ -d "$MOD_ROOT/src/client/resources" ]; then
+            mkdir -p tpl/src/client/resources
+            cp -a "$MOD_ROOT/src/client/resources/." tpl/src/client/resources/
+          fi
+
+          echo "Copied source files:"
+          find tpl/src -maxdepth 6 -type f | sort | head -250
+
+      - name: Build
         id: build
         continue-on-error: true
         working-directory: tpl
         run: |
           chmod +x gradlew
           ./gradlew build --no-daemon
-      - name: Диагностика API
+
+      - name: Diagnostics
         if: always()
         run: |
-          if [ -f mod/ci/diag.sh ]; then bash mod/ci/diag.sh; fi
-      - uses: actions/upload-artifact@v4
+          if [ -f mod/ci/diag.sh ]; then
+            bash mod/ci/diag.sh
+          fi
+
+      - name: Upload diagnostics
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: diag
           path: diag
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload JAR
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: jar
           path: |
             tpl/build/libs/*.jar
             !tpl/build/libs/*-sources.jar
           if-no-files-found: warn
-      - name: Итог сборки
+
+      - name: Fail workflow if build failed
         if: steps.build.outcome == 'failure'
         run: exit 1
